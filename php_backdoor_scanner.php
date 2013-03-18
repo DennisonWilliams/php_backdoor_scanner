@@ -6,6 +6,8 @@ $config['output_file'] = "output/results_".date("Y-m-d").".txt";
 $config['false_positives_file'] = "false_positives.txt";
 $config['email'] = "sysop@radicaldesigns.org";
 $config['sha1sums_db'] = 'sha1sums.db';
+$config['verbose'] = 0;
+$config['excludes'] = array( '.', '..', '.git', '.gitignore', '.svn');
 
 // files are suspicious if they contain any of these strings
 $suspicious_strings = array(
@@ -25,6 +27,24 @@ if(file_exists($config['false_positives_file'])) {
     $false_positives = false;
 }
 
+// sha1sums
+$sha1sums = false;
+if (file_exists($config['sha1sums_db'])) {
+	try {
+		$query = 'SELECT count(*) AS count FROM sha1sums where sha1sum=?';
+		$dbhandle = new PDO('sqlite:'. $config['sha1sums_db']);
+		$dbhandle->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+		$stmt = $dbhandle->prepare($query);
+		$config['sha1_select_stmt'] = $stmt;
+		$sha1sums = true;
+	}
+	catch (PDOException $e) {
+		print 'Unable to select the sha1sum count from the database('. $config['sha1sums_db'] .'): '. 
+			$e->getMessage();
+		exit(1);
+	}
+}
+
 // returns whether or not it's a php file
 function is_php_file($filename) {
     return substr($filename, -4) == ".php" || 
@@ -40,6 +60,7 @@ function backdoor_scan($path) {
     global $config;
     global $false_positives;
     global $dir_count;
+		global $sha1sums;
     
     echo ".";
     $dir_count++;
@@ -54,10 +75,14 @@ function backdoor_scan($path) {
         // skip . and ..
         if($filename != "." && $filename != "..") {
             $full_filename = $d->path."/".$filename;
-            
-            // is it a false positive?
+
+						// Is there a sha1sum of the file?
             $false = false;
-            if($false_positives) {
+						if($sha1sums && is_file_sha1_whitelisted($full_filename)) {
+							$false= true;
+						}	
+            // is it a false positive?
+            else if($false_positives) {
                 if(in_array($full_filename, $false_positives))
                     $false = true;
             }
@@ -102,22 +127,42 @@ function backdoor_scan($path) {
  *  the hashes are derived to be in the format <application_name>/<version>/
  */
 
+function is_file_sha1_whitelisted($file) {
+	global $config;
+
+	// Get file sha1sum
+	$sha1 = sha1_file($file);
+
+	// See if it exists in the DB
+	/*
+	$query = 'SELECT a.name AS application, v.name AS version, s.name AS file FROM sha1sums AS s '.
+		'LEFT JOIN applications AS a ON a.anid = s.anid '.
+		'LEFT JOIN versions AS v ON v.avid = s.avid '.
+		'WHERE s.sha1sum=?';
+	*/
+
+	try {
+		$config['sha1_select_stmt']->execute(array($sha1));
+		$row = $config['sha1_select_stmt']->fetch(PDO::FETCH_ASSOC);
+		return $row['count'];
+	}
+	catch (PDOException $e) {
+		print 'Unable to select the sha1sum count from the database('. $config['sha1sums_db'] .'): '. 
+			$e->getMessage();
+		exit(1);
+	}
+}
+
 function add_sha1sums($source_directory) {
 	global $config;
 
-	if (!file_exists($config['sha1sums_sb'])) {
+	if (!file_exists($config['sha1sums_db'])) {
 		print "argument add-sha1sums expects there to be an existing sha1sum database (".
 			$config['sha1sums_db'] .") but it could not be found.  Maybe you meant to ".
 			"use the rebuild-sha1sums argument?\n";
 		exit(1);
 	}
 
-	$dbhandle = sqlite3::open($config['sha1sums_sb'], 0666, $error);
-	if (!$dbhandle) {
-		print "There was an issue accessing the sha1sum database: $error\n";
-		exit(1);
-	}
-	
 	// AND = Application Name Directory
 	$AND = basename($source_directory);
 
@@ -129,49 +174,43 @@ function add_sha1sums($source_directory) {
 		exit(1);
 	}
 
-	// Get the Application Name ID
-	$ANID = _get_application_name_id($dbhandle, $AND);
+	try {
+		$dbhandle = new PDO('sqlite:'. $config['sha1sums_db']);
+		$dbhandle->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-	// Get the Application Version ID
-	$AVID = _get_application_name_id($dbhandle, $AVD, $ANID);
+		// AVD = Application Version Directory
+		while(false !== ($AVD = $ANDH->read())) {
+			if(array_search($AVD, $config['excludes']) === false) {
 
-	// AVD = Application Version Directory
-	while(false !== ($AVD = $ANDH->read())) {
-		if (is_dir($source_directory.'/'.$AVD)) {
-			_add_sha1sums($dbhandle, $ANID, $AVID, $source_directory.'/'.$AVD);
+				if (is_dir($source_directory.'/'.$AVD)) {
+					_add_sha1sums($dbhandle, $AND, $AVD, $source_directory.'/'.$AVD);
+				}
+			}
 		}
+		unset($dbhandle);
+	}
+	catch (PDOException $e) {
+		print 'Unable to add sha1sumes to the database('. $config['sha1sums_db'] .'): '. 
+			$e->getMessage();
+		exit(1);
 	}
 
-	sqlite_close($dbhandle);
+	print "[] Added sha1sums.\n";
+
 }
 
 function _get_application_name_id($dbhandle, $AND) {
 	// Check if it is in the DB, otherise add it
-	$query = 'SELECT anid FROM applications WHERE name="'. $AND .'"';
-	$result = sqlite_query($dbhandle, $query);
-	if (!$result) {
-		print "Could not find the applications name $AND in the database\n";
-		exit(1);
-	}
+	$query = 'SELECT anid FROM applications WHERE name=?';
+	$stmt = $dbhandle->prepare($query);
+	$stmt->execute(array($AND));
+	$row = $stmt->fetch(PDO::FETCH_ASSOC);
 
-	$row = sqlite_fetch_array($result, SQLITE_ASSOC);
-	if (!array_key_exists('anid', $row)) {
-		$query = 'INSERT INTO applications(name) VALUES("'. $AND .'")';
-		$ok = sqlite_exec($dbhandle, $query, $error);
-		if (!$ok) {
-			print "Unable to add application name($AND) to the database\n";
-			exit(1);
-		}
-
-		// There unfortunately does not seem to be a way to get the recently
-		// inserted primary key from the result of an insert statement
-		$query = 'SELECT anid FROM applications WHERE name="'. $AND .'"';
-		$result = sqlite_query($dbhandle, $query);
-		if (!$result) {
-			print "Could not find the application name $AND in the database\n";
-			exit(1);
-		}
-		$row = sqlite_fetch_array($result, SQLITE_ASSOC);
+	if ($row === false || !array_key_exists('anid', $row)) {
+		$query = 'INSERT INTO applications(name) VALUES(?)';
+		$stmt = $dbhandle->prepare($query);
+		$stmt->execute(array($AND));
+		return $dbhandle->lastInsertid();
 	}
 
 	return $row['anid'];
@@ -179,38 +218,23 @@ function _get_application_name_id($dbhandle, $AND) {
 
 function _get_application_version_id($dbhandle, $AVD, $ANID) {
 	// Check if it is in the DB, otherise add it
-	$query = 'SELECT avid FROM versions WHERE name="'. $AVD .'" AND anid='. $ANID;
-	$result = sqlite_query($dbhandle, $query);
-	if (!$result) {
-		print "Could not find the application version for $AVD in the database\n";
-		exit(1);
-	}
+	$query = 'SELECT avid FROM versions WHERE name=? AND anid=?';
+	$stmt = $dbhandle->prepare($query);
+	$stmt->execute(array($AVD, $ANID));
+	$row = $stmt->fetch(PDO::FETCH_ASSOC);
 
-	$row = sqlite_fetch_array($result, SQLITE_ASSOC);
-	if (!array_key_exists('avid', $row)) {
-		$query = 'INSERT INTO versions(name, anid) VALUES("'. $AVD .'",'. $ANID .')';
-		$ok = sqlite_exec($dbhandle, $query, $error);
-		if (!$ok) {
-			print "Unable to add application version($AVD) to the database\n";
-			exit(1);
-		}
-
-		// There unfortunately does not seem to be a way to get the recently
-		// inserted primary key from the result of an insert statement
-		$query = 'SELECT avid FROM versions WHERE name="'. $AVD .'" AND anid='. $ANID;
-		$result = sqlite_query($dbhandle, $query);
-		if (!$result) {
-			print "Could not find the application version $AVD in the database\n";
-			exit(1);
-		}
-		$row = sqlite_fetch_array($result, SQLITE_ASSOC);
+	if ($row === false || !array_key_exists('avid', $row)) {
+		$query = 'INSERT INTO versions(name, anid) VALUES(?,?)';
+		$stmt = $dbhandle->prepare($query);
+		$stmt->execute(array($AVD, $ANID));
+		return $dbhandle->lastInsertid();
 	}
 
 	return $row['avid'];
 }
 
-function _add_sha1sums($dbhandle, $ANID, $AVID, $path) {
-	$excludes = array( '.', '..', '.git', '.gitignore', '.svn');
+function _add_sha1sums($dbhandle, $AND, $AVD, $path) {
+	global $config;
 
 	// open directory
 	$d = @dir($path);
@@ -220,8 +244,11 @@ function _add_sha1sums($dbhandle, $ANID, $AVID, $path) {
 	}
 
 	while(false !== ($filename = $d->read())) {
+		if ($config['verbose']) {
+			print "[verbose] Examining $filename.\n";
+		}
 		// skip . and ..
-		if(array_search($filename, $excludes) === false) {
+		if(array_search($filename, $config['excludes']) === false) {
 			$full_filename = $d->path."/".$filename;
 
 			// is it another directory?
@@ -229,24 +256,52 @@ function _add_sha1sums($dbhandle, $ANID, $AVID, $path) {
 				// scan it
 				_add_sha1sums($dbhandle, $AND, $AVD, $full_filename);
 			} else if (is_file($full_filename)) {
-				if (!preg_match(":$AND/$AVD/\(.*\):", $full_filename, $matches)) {
+				if (!preg_match(":$AND/$AVD/(.*):", $full_filename, $matches)) {
+					//print "preg_match(\":$AND/$AVD/\(.*\):\", \$full_filename, \$matches)\n";
 					print "There was a problem getting the application file name from $full_filename\n";
 					exit(1);
 				}
 
-				$query = 'INSERT INTO sha1sum(sha1sum, afn, aid, avid) VALUES("'.
-					sha1_file($full_filename) .'","'. $full_filename .'","'. $ANID .','. $AVID .')';
-				$ok = sqlite_exec($dbhandle, $query, $error);
-				if (!$ok) {
-					print "Unable to add the sha1sum for the application file($full_filename) to the ".
-						"database.\n";
-					exit(1);
-				}
+				$ANID =	_get_application_name_id($dbhandle, $AND);
+				$query = 'INSERT INTO sha1sums(sha1sum, name, anid, avid) VALUES(?,?,?,?)';
+				$stmt = $dbhandle->prepare($query);
+				$stmt->execute(array(sha1_file($full_filename), $matches[1],
+					$ANID, _get_application_version_id($dbhandle, $AVD, $ANID)));
 			}
 			// If its not a file and its not a directory to we really care?
 		}
 	}
 }
+
+function dump_sha1sums() {
+	global $config;
+
+	if (!file_exists($config['sha1sums_db'])) {
+		print "The database file (". $config['sha1sums_db'] .") does not exist.\n";
+		exit(1);
+	}
+
+	$sha1sums = 'SELECT a.name AS application, v.name AS version, s.name AS file, s.sha1sum AS sha1 FROM sha1sums AS s '.
+		'LEFT JOIN applications AS a ON a.anid = s.anid '.
+		'LEFT JOIN versions AS v ON v.avid = s.avid';
+
+	try {
+		$dbhandle = new PDO('sqlite:'. $config['sha1sums_db']);
+		$dbhandle->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+		$stmt = $dbhandle->query($sha1sums);
+		foreach ($stmt as $row) {
+			//print $row['a.name'] .'('. $row['v.name'] .') '. $row['s.name'] .' => '. $row['s.sha1sum'] ."\n";
+			print $row['application'] .'('. $row['version'] .') '. $row['file'] .' => '. $row['sha1'] ."\n";
+		}
+		unset($dbhandle);
+	} 
+	catch (PDOException $e) {
+		print 'Unable to select the sha1sums from the database('. $config['sha1sums_db'] .'): '. 
+			$e->getMessage();
+		exit(1);
+	}
+}
+
 
 function rebuild_sha1sums($source_directory) {
 	global $config;
@@ -258,22 +313,10 @@ function rebuild_sha1sums($source_directory) {
 	}
 
 	$error = '';
-	$dbhandle = sqlite3::open($config['sha1sums_db'], 0666, $error);
-	if (!$dbhandle) {
-		print "There was an issue accessing the sha1sum database: $error\n";
-		exit(1);
-	}
-
 	// DB Schema
 	$applications = 'CREATE TABLE applications( '.
 		'anid integer PRIMARY KEY, '. // anid is an alias for ROWID
 		'name text UNIQUE NOT NULL)';
-
-	$ok = sqlite_exec($dbhandle, $applications, $error);
-	if (!$ok) {
-		print "Unable to add applications table($applications): $error.\n";
-		exit(1);
-	}
 
 	$versions = 'CREATE TABLE versions( '.
 		'avid integer PRIMARY KEY, '. // avid is an alias for ROWID
@@ -281,45 +324,42 @@ function rebuild_sha1sums($source_directory) {
 		'anid integer, '.
 		'FOREIGN KEY(anid) REFERENCES applications(anid))';
 
-	$ok = sqlite_exec($dbhandle, $versions, $error);
-	if (!$ok) {
-		print "Unable to add versions table($versions): $error.\n";
-		exit(1);
-	}
-
 	$sha1sums = 'CREATE TABLE sha1sums( '.
-		'sha1sum text UNIQUE NOT NULL, '.
+		'sha1sum text NOT NULL, '. // This is actually not unique because the same
+															 // file can exist in multiple versions of a 
+															 // application.
 		'name text NOT NULL, '.
 		'anid integer, '.
 		'avid integer, '.
 		'FOREIGN KEY(anid) REFERENCES applications(anid), '.
 		'FOREIGN KEY(avid) REFERENCES versions(avid))';
 
-	$ok = sqlite_exec($dbhandle, $sha1sums, $error);
-	if (!$ok) {
-		print "Unable to add versions table($sha1sums): $error.\n";
+	try {
+		$dbhandle = new PDO('sqlite:'. $config['sha1sums_db']);
+		$dbhandle->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+		$dbhandle->exec($applications);
+		$dbhandle->exec($versions);
+		$dbhandle->exec($sha1sums);
+		unset($dbhandle);
+	} 
+	catch (PDOException $e) {
+		print 'Unable to initialize the database('. $config['sha1sums_db'] .'): '. 
+			$e->getMessage();
 		exit(1);
 	}
-	
-	sqlite_close($dbhandle);
 
 	print "[] Sha1sums Database created.\n";
-
 	add_sha1sums($source_directory);
 }
 
 // TODO: process command line arguments (rebuild database, etc)
-$options = getopt('', array('add-sha1sums:', 'rebuild-sha1sums:', 'dump-sha1sums'));
-
-/*
-class Sha1SumsDB extends SQLite3 {
-	function __construct() {
-		global $config;
-		$this->open($config['sha1sums_db']);
-	}
-}
-$db = new Sha1SumsDB();
-*/
+$options = getopt('', array(
+	'add-sha1sums:', 
+	'rebuild-sha1sums:', 
+	'dump-sha1sums',
+	'target-dir:', 
+	'verbose')
+);
 
 if (array_key_exists('add-sha1sums', $options) && !is_dir($options['add-sha1sums'])) {
 	print "add-sha1sums expects a directory path argument containing known good ".
@@ -336,8 +376,23 @@ if (array_key_exists('rebuild-sha1sums', $options) && !is_dir($options['rebuild-
 } else if (array_key_exists('rebuild-sha1sums', $options) && is_dir($options['rebuild-sha1sums'])) {
 	rebuild_sha1sums($options['rebuild-sha1sums']);
 }
-die("DEBUG: not running checks.\n". print_r($options, 1)."\n");
 
+if (array_key_exists('dump-sha1sums', $options)) {
+	dump_sha1sums();
+	exit(0);
+} 
+
+if (array_key_exists('target-dir', $options) && !is_dir($options['target-dir'])) {
+	print 'target-dir exppects a diirectory path to look for suspicious files and '.
+		"none was specified.\n";
+	exit(1);
+} else if (array_key_exists('target-dir', $options) && is_dir($options['target-dir'])) {
+	$config['target_dir'] = $options['target-dir'];
+}
+
+if (array_key_exists('verbose', $options)) {
+	$config['verbose'] = true;
+}
 
 // start with an empty output file
 $of = fopen($config['output_file'], "w");
