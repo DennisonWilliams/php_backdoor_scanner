@@ -113,8 +113,7 @@ function add_sha1sums($source_directory) {
 		exit(1);
 	}
 
-	$dbhandle = sqlite_open($config['sha1sums_sb'], 0666, $error);
-	//$dbhandle = sqlite3::open($config['sha1sums_sb'], 0666, $error);
+	$dbhandle = sqlite3::open($config['sha1sums_sb'], 0666, $error);
 	if (!$dbhandle) {
 		print "There was an issue accessing the sha1sum database: $error\n";
 		exit(1);
@@ -260,8 +259,7 @@ function rebuild_sha1sums($source_directory) {
 	}
 
 	$error = '';
-	$dbhandle = sqlite_open($config['sha1sums_db'], 0666, $error);
-	//$dbhandle = sqlite3::open($config['sha1sums_db'], 0666, $error);
+	$dbhandle = sqlite3::open($config['sha1sums_db'], 0666, $error);
 	if (!$dbhandle) {
 		print "There was an issue accessing the sha1sum database: $error\n";
 		exit(1);
