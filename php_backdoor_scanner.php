@@ -5,6 +5,7 @@ $config['target_dir'] = "/home";
 $config['output_file'] = "output/results_".date("Y-m-d").".txt";
 $config['false_positives_file'] = "false_positives.txt";
 $config['email'] = "sysop@radicaldesigns.org";
+$config['sha1sums_db'] = 'sha1sums.db';
 
 // files are suspicious if they contain any of these strings
 $suspicious_strings = array(
@@ -94,6 +95,251 @@ function backdoor_scan($path) {
         }
     }
 }
+
+/**
+ *  Sha1sums can be used to keep known good hashes of known good code.  We 
+ *  maintain a databases of these hashes and expect the source from which
+ *  the hashes are derived to be in the format <application_name>/<version>/
+ */
+
+function add_sha1sums($source_directory) {
+	global $config;
+
+	if (!file_exists($config['sha1sums_sb'])) {
+		print "argument add-sha1sums expects there to be an existing sha1sum database (".
+			$config['sha1sums_db'] .") but it could not be found.  Maybe you meant to ".
+			"use the rebuild-sha1sums argument?\n";
+		exit(1);
+	}
+
+	$dbhandle = sqlite_open($config['sha1sums_sb'], 0666, $error);
+	//$dbhandle = sqlite3::open($config['sha1sums_sb'], 0666, $error);
+	if (!$dbhandle) {
+		print "There was an issue accessing the sha1sum database: $error\n";
+		exit(1);
+	}
+	
+	// AND = Application Name Directory
+	$AND = basename($source_directory);
+
+	// ANDH = Application Name Directory Handle
+	$ANDH = @dir($source_directory);
+	if($ANDH == false) {
+		print "Unable to add sha1sums because the source directory passed in could ".
+			"not be opened\n";
+		exit(1);
+	}
+
+	// Get the Application Name ID
+	$ANID = _get_application_name_id($dbhandle, $AND);
+
+	// Get the Application Version ID
+	$AVID = _get_application_name_id($dbhandle, $AVD, $ANID);
+
+	// AVD = Application Version Directory
+	while(false !== ($AVD = $ANDH->read())) {
+		if (is_dir($source_directory.'/'.$AVD)) {
+			_add_sha1sums($dbhandle, $ANID, $AVID, $source_directory.'/'.$AVD);
+		}
+	}
+
+	sqlite_close($dbhandle);
+}
+
+function _get_application_name_id($dbhandle, $AND) {
+	// Check if it is in the DB, otherise add it
+	$query = 'SELECT anid FROM applications WHERE name="'. $AND .'"';
+	$result = sqlite_query($dbhandle, $query);
+	if (!$result) {
+		print "Could not find the applications name $AND in the database\n";
+		exit(1);
+	}
+
+	$row = sqlite_fetch_array($result, SQLITE_ASSOC);
+	if (!array_key_exists('anid', $row)) {
+		$query = 'INSERT INTO applications(name) VALUES("'. $AND .'")';
+		$ok = sqlite_exec($dbhandle, $query, $error);
+		if (!$ok) {
+			print "Unable to add application name($AND) to the database\n";
+			exit(1);
+		}
+
+		// There unfortunately does not seem to be a way to get the recently
+		// inserted primary key from the result of an insert statement
+		$query = 'SELECT anid FROM applications WHERE name="'. $AND .'"';
+		$result = sqlite_query($dbhandle, $query);
+		if (!$result) {
+			print "Could not find the application name $AND in the database\n";
+			exit(1);
+		}
+		$row = sqlite_fetch_array($result, SQLITE_ASSOC);
+	}
+
+	return $row['anid'];
+}
+
+function _get_application_version_id($dbhandle, $AVD, $ANID) {
+	// Check if it is in the DB, otherise add it
+	$query = 'SELECT avid FROM versions WHERE name="'. $AVD .'" AND anid='. $ANID;
+	$result = sqlite_query($dbhandle, $query);
+	if (!$result) {
+		print "Could not find the application version for $AVD in the database\n";
+		exit(1);
+	}
+
+	$row = sqlite_fetch_array($result, SQLITE_ASSOC);
+	if (!array_key_exists('avid', $row)) {
+		$query = 'INSERT INTO versions(name, anid) VALUES("'. $AVD .'",'. $ANID .')';
+		$ok = sqlite_exec($dbhandle, $query, $error);
+		if (!$ok) {
+			print "Unable to add application version($AVD) to the database\n";
+			exit(1);
+		}
+
+		// There unfortunately does not seem to be a way to get the recently
+		// inserted primary key from the result of an insert statement
+		$query = 'SELECT avid FROM versions WHERE name="'. $AVD .'" AND anid='. $ANID;
+		$result = sqlite_query($dbhandle, $query);
+		if (!$result) {
+			print "Could not find the application version $AVD in the database\n";
+			exit(1);
+		}
+		$row = sqlite_fetch_array($result, SQLITE_ASSOC);
+	}
+
+	return $row['avid'];
+}
+
+function _add_sha1sums($dbhandle, $ANID, $AVID, $path) {
+	$excludes = array( '.', '..', '.git', '.gitignore', '.svn');
+
+	// open directory
+	$d = @dir($path);
+	if($d == false) {
+		echo "\n[] Failed to open directory ".$path.", skipping";
+		return;
+	}
+
+	while(false !== ($filename = $d->read())) {
+		// skip . and ..
+		if(array_search($filename, $excludes) === false) {
+			$full_filename = $d->path."/".$filename;
+
+			// is it another directory?
+			if(is_dir($full_filename)) {
+				// scan it
+				_add_sha1sums($dbhandle, $AND, $AVD, $full_filename);
+			} else if (is_file($full_filename)) {
+				if (!preg_match(":$AND/$AVD/\(.*\):", $full_filename, $matches)) {
+					print "There was a problem getting the application file name from $full_filename\n";
+					exit(1);
+				}
+
+				$query = 'INSERT INTO sha1sum(sha1sum, afn, aid, avid) VALUES("'.
+					sha1_file($full_filename) .'","'. $full_filename .'","'. $ANID .','. $AVID .')';
+				$ok = sqlite_exec($dbhandle, $query, $error);
+				if (!$ok) {
+					print "Unable to add the sha1sum for the application file($full_filename) to the ".
+						"database.\n";
+					exit(1);
+				}
+			}
+			// If its not a file and its not a directory to we really care?
+		}
+	}
+}
+
+function rebuild_sha1sums($source_directory) {
+	global $config;
+
+	if (file_exists($config['sha1sums_db'])) {
+		print "The database file (". $config['sha1sums_db'] .") exists already.  ".
+			"Please backup or remove it first.\n";
+		exit(1);
+	}
+
+	$error = '';
+	$dbhandle = sqlite_open($config['sha1sums_db'], 0666, $error);
+	//$dbhandle = sqlite3::open($config['sha1sums_db'], 0666, $error);
+	if (!$dbhandle) {
+		print "There was an issue accessing the sha1sum database: $error\n";
+		exit(1);
+	}
+
+	// DB Schema
+	$applications = 'CREATE TABLE applications( '.
+		'anid integer PRIMARY KEY, '. // anid is an alias for ROWID
+		'name text UNIQUE NOT NULL)';
+
+	$ok = sqlite_exec($dbhandle, $applications, $error);
+	if (!$ok) {
+		print "Unable to add applications table($applications): $error.\n";
+		exit(1);
+	}
+
+	$versions = 'CREATE TABLE versions( '.
+		'avid integer PRIMARY KEY, '. // avid is an alias for ROWID
+		'name text NOT NULL, '.
+		'anid integer, '.
+		'FOREIGN KEY(anid) REFERENCES applications(anid))';
+
+	$ok = sqlite_exec($dbhandle, $versions, $error);
+	if (!$ok) {
+		print "Unable to add versions table($versions): $error.\n";
+		exit(1);
+	}
+
+	$sha1sums = 'CREATE TABLE sha1sums( '.
+		'sha1sum text UNIQUE NOT NULL, '.
+		'name text NOT NULL, '.
+		'anid integer, '.
+		'avid integer, '.
+		'FOREIGN KEY(anid) REFERENCES applications(anid), '.
+		'FOREIGN KEY(avid) REFERENCES versions(avid))';
+
+	$ok = sqlite_exec($dbhandle, $sha1sums, $error);
+	if (!$ok) {
+		print "Unable to add versions table($sha1sums): $error.\n";
+		exit(1);
+	}
+	
+	sqlite_close($dbhandle);
+
+	print "[] Sha1sums Database created.\n";
+
+	add_sha1sums($source_directory);
+}
+
+// TODO: process command line arguments (rebuild database, etc)
+$options = getopt('', array('add-sha1sums:', 'rebuild-sha1sums:', 'dump-sha1sums'));
+
+/*
+class Sha1SumsDB extends SQLite3 {
+	function __construct() {
+		global $config;
+		$this->open($config['sha1sums_db']);
+	}
+}
+$db = new Sha1SumsDB();
+*/
+
+if (array_key_exists('add-sha1sums', $options) && !is_dir($options['add-sha1sums'])) {
+	print "add-sha1sums expects a directory path argument containing known good ".
+		"application source code and this was not found\n";
+	exit(1);
+} else if (array_key_exists('add-sha1sums', $options) && is_dir($options['add-sha1sums'])) {
+	add_sha1sums($options['add-sha1sums']);
+}
+
+if (array_key_exists('rebuild-sha1sums', $options) && !is_dir($options['rebuild-sha1sums'])) {
+	print "rebuild-sha1sums expects a directory path argument containing known good ".
+		"application source code and this was not found\n";
+	exit(1);
+} else if (array_key_exists('rebuild-sha1sums', $options) && is_dir($options['rebuild-sha1sums'])) {
+	rebuild_sha1sums($options['rebuild-sha1sums']);
+}
+die("DEBUG: not running checks.\n". print_r($options, 1)."\n");
+
 
 // start with an empty output file
 $of = fopen($config['output_file'], "w");
