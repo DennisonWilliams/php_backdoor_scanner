@@ -5,9 +5,9 @@ $config['target_dir'] = "/home";
 $config['output_file'] = "/home/wordpress-base/scripts/php_backdoor_scanner/output/results_".date("Y-m-d").".txt";
 $config['false_positives_file'] = "/home/wordpress-base/scripts/php_backdoor_scanner/false_positives.txt";
 $config['email'] = "sysop@radicaldesigns.org";
-$config['sha1sums_db'] = 'sha1sums.db';
+$config['sha1sums_db'] = '/home/wordpress-base/scripts/php_backdoor_scanner/sha1sums.db';
 $config['verbose'] = 0;
-$config['excludes'] = array( '.', '..', '.git', '.gitignore', '.svn');
+$config['excludes'] = array( '.', '..', '.git', '.gitignore', '.svn', 'tags', 'branches');
 
 // files are suspicious if they contain any of these strings
 $suspicious_strings = array(
@@ -74,49 +74,52 @@ function backdoor_scan($path) {
     }
     while(false !== ($filename = $d->read())) {
         // skip . and ..
-        if($filename != "." && $filename != "..") {
-            $full_filename = $d->path."/".$filename;
+        if($filename != "." && $filename != ".." && !is_link($filename)) {
+          $full_filename = $d->path."/".$filename;
 
-						// Is there a sha1sum of the file?
+            // is it another directory?
+            if(is_dir($full_filename)) {
+                // scan it
+                backdoor_scan($full_filename);
+            } else {        
+
+              // Is there a sha1sum of the file?
+              // TODO: if we are only scanning file sets that we have sha1sums for then if there is not a sha1sum then we should alert
             $false = false;
-						if($sha1sums && is_file_sha1_whitelisted($full_filename)) {
-							$false= true;
-						}	
+	    if($sha1sums && is_file_sha1_whitelisted($full_filename)) {
+	      $false= true;
+            }	
+
             // is it a false positive?
             else if($false_positives) {
                 if(in_array($full_filename, $false_positives))
                     $false = true;
             }
             if(!$false) {
-                // is it another directory?
-                if(is_dir($full_filename)) {
-                    // scan it
-                    backdoor_scan($full_filename);
-                } else {        
-                    // is it a php file?
-                    if(is_php_file($filename)) {
-                        // scan this file
-                        $contents = file_get_contents($full_filename);
-                        $suspicious = false;
-                        foreach($suspicious_strings as $string) {
-                            if(strpos($contents, $string) != false)
-                                $suspicious = true;
-                        }
-                        if($suspicious) {
-                            // found a suspicious file!
-                            echo "\n[] *** Suspicious file found: ".$full_filename;
-                            
-                            // record this in the output file
-                            // note: i'm opening and closing this file each time so you can view the file before the entire scan is done
-                            $of = fopen($config['output_file'], "a");
-                            fwrite($of, $full_filename."\n");
-                            fclose($of);
+              // is it a php file?
+              if(is_php_file($filename)) {
+                  // scan this file
+                  $contents = file_get_contents($full_filename);
+                  $suspicious = false;
+                  foreach($suspicious_strings as $string) {
+                      if(strpos($contents, $string) != false)
+                          $suspicious = true;
+                  }
+                  if($suspicious) {
+                      // found a suspicious file!
+                      echo "\n[] *** Suspicious file found: ".$full_filename;
+                      
+                      // record this in the output file
+                      // note: i'm opening and closing this file each time so you can view the file before the entire scan is done
+                      $of = fopen($config['output_file'], "a");
+                      fwrite($of, $full_filename."\n");
+                      fclose($of);
 
-                            // save it the array
-                            $suspicious_files[] = $full_filename;
-                        }
-                    }
-                }
+                      // save it the array
+                      $suspicious_files[] = $full_filename;
+                  }
+              }
+              }
             }
         }
     }
@@ -179,7 +182,7 @@ function add_sha1sums($source_directory) {
 		$dbhandle = new PDO('sqlite:'. $config['sha1sums_db']);
 		$dbhandle->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-		// AVD = Application Version Directory
+                // AVD = Application Version Directory
 		while(false !== ($AVD = $ANDH->read())) {
 			if(array_search($AVD, $config['excludes']) === false) {
 
@@ -245,12 +248,12 @@ function _add_sha1sums($dbhandle, $AND, $AVD, $path) {
 	}
 
 	while(false !== ($filename = $d->read())) {
-		if ($config['verbose']) {
-			print "[verbose] Examining $filename.\n";
-		}
 		// skip . and ..
+                $full_filename = $d->path."/".$filename;
+		if ($config['verbose']) {
+			print "[verbose] Examining $full_filename.\n";
+		}
 		if(array_search($filename, $config['excludes']) === false) {
-			$full_filename = $d->path."/".$filename;
 
 			// is it another directory?
 			if(is_dir($full_filename)) {
@@ -261,11 +264,11 @@ function _add_sha1sums($dbhandle, $AND, $AVD, $path) {
 					//print "preg_match(\":$AND/$AVD/\(.*\):\", \$full_filename, \$matches)\n";
 					print "There was a problem getting the application file name from $full_filename\n";
 					exit(1);
-				}
+                                }
 
 				$ANID =	_get_application_name_id($dbhandle, $AND);
 				$query = 'INSERT INTO sha1sums(sha1sum, name, anid, avid) VALUES(?,?,?,?)';
-				$stmt = $dbhandle->prepare($query);
+                                $stmt = $dbhandle->prepare($query);
 				$stmt->execute(array(sha1_file($full_filename), $matches[1],
 					$ANID, _get_application_version_id($dbhandle, $AVD, $ANID)));
 			}
@@ -357,17 +360,22 @@ function rebuild_sha1sums($source_directory) {
 $options = getopt('', array(
 	'add-sha1sums:', 
 	'rebuild-sha1sums:', 
-	'dump-sha1sums',
+        'dump-sha1sums',
 	'target-dir:', 
 	'verbose')
 );
 
+if (array_key_exists('verbose', $options)) {
+	$config['verbose'] = true;
+}
+
 if (array_key_exists('add-sha1sums', $options) && !is_dir($options['add-sha1sums'])) {
 	print "add-sha1sums expects a directory path argument containing known good ".
 		"application source code and this was not found\n";
-	exit(1);
+        exit(1);
 } else if (array_key_exists('add-sha1sums', $options) && is_dir($options['add-sha1sums'])) {
-	add_sha1sums($options['add-sha1sums']);
+  add_sha1sums($options['add-sha1sums']);
+  exit(0);
 }
 
 if (array_key_exists('rebuild-sha1sums', $options) && !is_dir($options['rebuild-sha1sums'])) {
@@ -389,10 +397,6 @@ if (array_key_exists('target-dir', $options) && !is_dir($options['target-dir']))
 	exit(1);
 } else if (array_key_exists('target-dir', $options) && is_dir($options['target-dir'])) {
 	$config['target_dir'] = $options['target-dir'];
-}
-
-if (array_key_exists('verbose', $options)) {
-	$config['verbose'] = true;
 }
 
 // start with an empty output file
