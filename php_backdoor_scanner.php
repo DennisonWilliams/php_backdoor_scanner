@@ -2,8 +2,8 @@
 
 // configuration
 $config['target_dir'] = "/home";
-$config['output_file'] = "output/results_".date("Y-m-d").".txt";
-$config['false_positives_file'] = "false_positives.txt";
+$config['output_file'] = "/home/wordpress-base/scripts/php_backdoor_scanner/output/results_".date("Y-m-d").".txt";
+$config['false_positives_file'] = "/home/wordpress-base/scripts/php_backdoor_scanner/false_positives.txt";
 $config['email'] = "sysop@radicaldesigns.org";
 
 // files are suspicious if they contain any of these strings
@@ -13,7 +13,8 @@ $suspicious_strings = array(
     'uname -a', 'eval(base64_decode(',
     '(0xf7001E)?0x8b:(0xaE17A)',
     'd06f46103183ce08bbef999d3dcc426a',
-    'rss_f541b3abd05e7962fcab37737f40fad8');
+    'rss_f541b3abd05e7962fcab37737f40fad8',
+    '(0x4eF1)?0xBf9C0');
 $suspicious_files = array();
 
 // false positives
