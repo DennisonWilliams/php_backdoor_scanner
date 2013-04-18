@@ -1,9 +1,10 @@
 <?php
 
 // configuration
+$basedir = dirname($argv[0]);
 $config['target_dir'] = "/home";
-$config['output_file'] = "output/results_".date("Y-m-d").".txt";
-$config['false_positives_file'] = "false_positives.txt";
+$config['output_file'] = $basedir ."/output/results_".date("Y-m-d").".txt";
+$config['false_positives_file'] = $basedir ."/false_positives.txt";
 $config['email'] = "sysop@radicaldesigns.org";
 
 // files are suspicious if they contain any of these strings
